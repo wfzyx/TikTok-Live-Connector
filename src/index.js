@@ -1,7 +1,6 @@
 const { EventEmitter } = require("node:events");
 
 const TikTokHttpClient = require("./lib/tiktokHttpClient.js");
-const WebcastWebsocket = require("./lib/webcastWebsocket.js");
 const {
 	getRoomIdFromMainPageHtml,
 	validateAndNormalizeUniqueId,
@@ -10,6 +9,7 @@ const {
 } = require("./lib/tiktokUtils.js");
 const { simplifyObject } = require("./lib/webcastDataConverter.js");
 const {
+	serializeMessage,
 	deserializeMessage,
 	deserializeWebsocketMessage,
 } = require("./lib/webcastProtobuf.js");
@@ -69,7 +69,10 @@ class WebcastPushConnection extends EventEmitter {
 	#httpClient;
 	#availableGifts;
 
-	// Websocket
+	/**
+	 * Websocket connection
+	 * @type {WebSocket}
+	 */
 	#websocket;
 
 	// State
@@ -569,36 +572,51 @@ class WebcastPushConnection extends EventEmitter {
 
 	async #setupWebsocket(wsUrl, wsParams) {
 		return new Promise((resolve, reject) => {
-			this.#websocket = new WebcastWebsocket(
-				wsUrl,
-				this.#httpClient.cookieJar,
-				this.#clientParams,
-				wsParams,
-				this.#options.websocketHeaders,
-				this.#options.websocketOptions,
-			);
+			const url = `${wsUrl}?${new URLSearchParams({ ...this.#clientParams, ...wsParams })}&version_code=${Config.WEBCAST_VERSION_CODE}`;
+			const headers = {
+				Cookie: this.#httpClient.cookieJar.getCookieString(),
+				...(this.#options.websocketHeaders || {}),
+			};
 
-			this.#websocket.on("connect", (wsConnection) => {
-				resolve();
+			console.log("URL", url);
+			console.log("Headers", headers);
 
-				wsConnection.on("error", (err) =>
-					this.#handleError(err, "Websocket Error"),
+			this.#websocket = new WebSocket(url, { headers });
+
+			this.#websocket.addEventListener("open", (evt) => {
+				console.log("Connected to Webcast Websocket");
+				this.#pingInterval = setInterval(
+					() => this.#websocket.send(Buffer.from("3A026862", "hex")),
+					10000,
 				);
-				wsConnection.on("close", () => {
-					this.disconnect();
-				});
 			});
 
-			this.#websocket.on("connectFailed", (err) =>
-				reject(`Websocket connection failed, ${err}`),
-			);
-			this.#websocket.on("webcastResponse", (msg) =>
-				this.#processWebcastResponse(msg),
-			);
-			this.#websocket.on("messageDecodingFailed", (err) =>
-				this.#handleError(err, "Websocket message decoding failed"),
-			);
+			this.#websocket.addEventListener("close", (evt) => {
+				console.error("Connection closed", evt.code, evt.reason);
+				clearInterval(this.#pingInterval);
+			});
 
+			this.#websocket.addEventListener("message", async (message) => {
+				try {
+					const decodedContainer = await deserializeWebsocketMessage(
+						message.data,
+					);
+					if (decodedContainer.id > 0) {
+						const ackMsg = serializeMessage("WebcastWebsocketAck", {
+							type: "ack",
+							id: decodedContainer.id,
+						});
+						this.#websocket.send(ackMsg);
+					}
+
+					// Emit 'WebcastResponse' from ws message container if decoding success
+					if (typeof decodedContainer.webcastResponse === "object") {
+						this.#processWebcastResponse(decodedContainer.webcastResponse);
+					}
+				} catch (err) {
+					console.error("Message decoding failed", err);
+				}
+			});
 			// Hard timeout if the WebSocketClient library does not handle connect errors correctly.
 			setTimeout(() => reject("Websocket not responding"), 30000);
 		});
