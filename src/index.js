@@ -578,13 +578,8 @@ class WebcastPushConnection extends EventEmitter {
 				...(this.#options.websocketHeaders || {}),
 			};
 
-			console.log("URL", url);
-			console.log("Headers", headers);
-
 			this.#websocket = new WebSocket(url, { headers });
-
 			this.#websocket.addEventListener("open", (evt) => {
-				console.log("Connected to Webcast Websocket");
 				this.#pingInterval = setInterval(
 					() => this.#websocket.send(Buffer.from("3A026862", "hex")),
 					10000,
@@ -592,7 +587,9 @@ class WebcastPushConnection extends EventEmitter {
 			});
 
 			this.#websocket.addEventListener("close", (evt) => {
-				console.error("Connection closed", evt.code, evt.reason);
+				console.error(
+					`Connection closed; Code: ${evt.code}, Reason: ${evt.reason}`,
+				);
 				clearInterval(this.#pingInterval);
 			});
 
